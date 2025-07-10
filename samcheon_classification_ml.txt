@@ -1,0 +1,132 @@
+## import packages
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+import xgboost
+from xgboost import XGBClassifier
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+import lightgbm as lgb
+from lightgbm import LGBMClassifier
+from lightgbm import plot_importance
+from sklearn.model_selection import GridSearchCV
+from sklearn import model_selection
+import warnings
+warnings.filterwarnings('ignore')
+import os
+import pickle
+import joblib
+
+## 환경설정
+pd.set_option('display.max_columns',100)
+pd.set_option('display.max_row', 100)
+
+##### 1) 가공된 데이터 불러오기
+## 하이티엔 데이터셋 불러오기
+trainSet = pd.read_csv(save_path + 'train_data(51-032).csv', encoding='euc-kr')
+testSet = pd.read_csv(save_path + 'test_data(51-032).csv', encoding='euc-kr')
+
+err_col = 'gubun01'
+resid = '51-032'
+
+## train/test set 분리
+train_x = trainSet.drop(columns=err_col)
+train_y = trainSet[err_col]
+test_x = testSet.drop(columns=err_col)
+test_y = testSet[err_col]
+
+##### 2) 모델 학습 및 저장
+## 1. XGBoost model
+xgb_model = xgboost.XGBClassifier(random_state=42, eval_metric='logloss')  # xgboost warning 없애기 위해 eval_metric 추가
+
+# 그리드 서치를 통해 최적의 파라미터 도출
+xgb_param = {'learning_rate': [0.01, 0.05, 0.1],
+             'subsample': [0.5, 0.8, 0.9],
+             'n_estimators': [10, 20, 30]}
+
+xgb_model = GridSearchCV(xgb_model, param_grid=xgb_param, verbose=1, cv=3)  # cv 수정
+xgb_model.fit(train_x, train_y)
+best_param = xgb_model.best_params_
+
+# XGBoost 모델 학습
+model = 'xgboost'
+xgb_model = xgboost.XGBClassifier(**best_param)
+xgb_model.fit(train_x, train_y)
+joblib.dump(xgb_model, save_path + 'model_xgb.pkl')           # xgb 모델 dump
+
+## 모델 결과 저장할 디렉토리 여부 확인 후 생성/저장
+if os.path.exists(save_path + '/모델 결과') == False:
+    os.mkdir(save_path + '/모델 결과')
+else:
+    pass
+
+# 모델 결과
+test_x2 = test_x.drop(columns = 'TRAN_TIME')
+xgb_pred = xgb_model.predict(test_x2)
+
+# 불량 확률 결과 저장
+model_probability = xgb_model.predict_proba(test_x2)
+model_probability_df = pd.DataFrame(model_probability, index=test_y.index)
+model_probability_df = pd.concat([test_y, model_probability_df], axis=1)
+time = test_x['TRAN_TIME']
+model_probability_df = pd.concat([model_probability_df, time], axis=1)
+model_probability_df = model_probability_df.rename(columns = {'TRAN_TIME':'시간', err_col:'실제값', 0:'양품확률', 1:'불량확률'})
+model_probability_df.loc[model_probability_df['실제값'] == 1, '실제값'] = "불량"
+model_probability_df.loc[model_probability_df['실제값'] == 0, '실제값'] = "양품"
+model_probability_df['시간'] = pd.to_datetime(model_probability_df['시간'], format='%Y%m%d%H%M%S')    #처리일시 형식 변환
+model_probability_df['RES_ID'] = resid
+model_probability_df = model_probability_df[['RES_ID','시간', '실제값', '양품확률', '불량확률']]
+model_probability_df.to_csv(save_path + '모델 결과/' + 'xgb 불량 확률(51-031).csv', encoding='euc-kr', index=False)
+
+# 모델 성능 지표 저장(confusion matrix)
+class_report = pd.DataFrame(classification_report(test_y, xgb_pred, output_dict=True)).transpose().reset_index().assign(RES_ID=resid)
+class_report = class_report[['RES_ID', 'index', 'precision', 'recall', 'f1-score', 'support']]
+class_report.to_csv(save_path + '모델 결과/' + 'xgb 평가지표(51-031).csv', encoding='euc-kr', index=False)
+
+
+## 2. LightGBM model
+model = 'lightgbm'
+lgb_model = lgb.LGBMClassifier(random_state=42)
+
+lgb_param = {'learning_rate': [0.01, 0.05, 0.1],
+             'subsample': [0.5, 0.8, 0.9],
+             'max_depth': [5, 10, 15]}
+
+lgb_model = GridSearchCV(lgb_model, param_grid=lgb_param, verbose=1, cv=3)  # cv 수정
+lgb_model.fit(train_x, train_y)
+
+best_param = lgb_model.best_params_
+
+# LightGBM 모델 학습
+lgb_model = lgb.LGBMClassifier(**best_param)
+lgb_model.fit(train_x, train_y)
+joblib.dump(lgb_model, save_path + 'model_lgb.pkl')           # xgb 모델 dump
+
+# 모델 결과
+lgb_pred = lgb_model.predict(test_x2)
+
+# 불량 확률 결과 저장
+model_probability = lgb_model.predict_proba(test_x2)
+model_probability_df = pd.DataFrame(model_probability, index=test_y.index)
+model_probability_df = pd.concat([test_y, model_probability_df], axis=1)
+time = test_x['TRAN_TIME']
+model_probability_df = pd.concat([model_probability_df, time], axis=1)
+model_probability_df = model_probability_df.rename(columns = {'TRAN_TIME':'시간', err_col:'실제값', 0:'양품확률', 1:'불량확률'})
+model_probability_df.loc[model_probability_df['실제값'] == 1, '실제값'] = "불량"
+model_probability_df.loc[model_probability_df['실제값'] == 0, '실제값'] = "양품"
+model_probability_df['시간'] = pd.to_datetime(model_probability_df['시간'], format='%Y%m%d%H%M%S')    #처리일시 형식 변환
+model_probability_df['RES_ID'] = resid
+model_probability_df = model_probability_df[['RES_ID','시간', '실제값', '양품확률', '불량확률']]
+model_probability_df.to_csv(save_path + '모델 결과/' + 'lgb 불량 확률(51-031).csv', encoding='euc-kr', index=False)
+
+# 모델 성능 지표 저장(confusion matrix)
+class_report = pd.DataFrame(classification_report(test_y, lgb_pred, output_dict=True)).transpose().reset_index().assign(RES_ID=resid)
+class_report = class_report[['RES_ID', 'index', 'precision', 'recall', 'f1-score', 'support']]
+class_report.to_csv(save_path + '모델 결과/' + 'lgb 평가지표(51-031).csv', encoding='euc-kr', index=False)
+
+
+
+
+
+
+
